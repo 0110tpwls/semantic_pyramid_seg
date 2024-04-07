@@ -7,9 +7,7 @@ from scipy.spatial import ConvexHull
 import argparse
 from tqdm import tqdm
 from time import time
-import multiprocessing
-from multiprocessing import Pool, cpu_count
-import logging
+from multiprocessing import Pool
 
 def rammer_douglas_peucker(mask_points, max_vertices=10, initial_tolerance=0.01):
     """
@@ -75,14 +73,23 @@ def simplify_polygon(polygon, mode, max_points):
     elif mode in ['convex', 'convex_max']:
         points = np.array(polygon)
         if mode =='convex':
-            max_points=100000000
+            max_points=10000
         simplified_points = simplify_to_convex_hull(points, max_vertices=max_points)
         return [tuple(point) for point in simplified_points]
     
-def evaluate_masks(ground_truth_masks, model_masks):
+def evaluate_masks_aggregated(results):
     """
-    Evaluates model masks against ground truth masks using Intersection over Union (IoU).
+    Aggregates results from all processes and evaluates model masks against ground truth masks using Intersection over Union (IoU).
     """
+    ground_truth_masks = []
+    model_masks = []
+    
+    # Aggregate results
+    for result in results:
+        input_polygons, output_polygons = result
+        ground_truth_masks.extend(input_polygons)
+        model_masks.extend(output_polygons)
+    
     iou_list = []
     
     for gt_mask, model_mask in zip(ground_truth_masks, model_masks):
@@ -104,107 +111,85 @@ def evaluate_masks(ground_truth_masks, model_masks):
     print(f"Average IoU: {average_iou}")
     print(f"Processed {len(iou_list)} masks out of {len(ground_truth_masks)}")
 
-def process_image_data(args):
+def process_single_image(img_info, image_dir, output_dir, simplification_mode, max_points, verbose):
     """
-    Processes a single image's COCO annotations.
-    This function is designed to be called in parallel.
+    Processes a single COCO image by overlaying simplified polygons on the image.
     """
-    img_info, coco_data, image_dir, output_dir, simplification_mode, max_points, verbose = args
+    global ann_data
+    image_path = f"{image_dir}/{img_info['file_name']}"
+    image = Image.open(image_path)
+    draw = ImageDraw.Draw(image) if verbose else None
+    # print(type(ann_data))
+    # print(ann_data)
+    # assert type(coco_data) != str
+    annotations = [ann for ann in ann_data if ann['image_id'] == img_info['id']]
     input_polygons = []
     output_polygons = []
-
-    image_path = f"{image_dir}/{img_info['file_name']}"
-    try:
-        image = Image.open(image_path)
-        draw = ImageDraw.Draw(image) if verbose else None
-
-        annotations = [ann for ann in coco_data['annotations'] if ann['image_id'] == img_info['id']]
-        
-        for ann in annotations:
-            for segmentation in ann['segmentation']:
-                polygon = [(segmentation[i], segmentation[i+1]) for i in range(0, len(segmentation), 2)]
-                if type(polygon[0][0]) == str:
-                    continue
-                input_polygons.append(polygon)
-
-                if simplification_mode == 'OG':
-                    simplified_polygon = [pts for pts in polygon if type(pts[0]) != str]
-                elif simplification_mode == 'bbox':
-                    bb = coco2bbox(ann['bbox'])
-                    simplified_polygon = bb
-                else:
-                    simplified_polygon = simplify_polygon(polygon, simplification_mode, max_points)
-
-                if verbose:
-                    draw.polygon(simplified_polygon, outline='cyan', width=3)
-                output_polygons.append(simplified_polygon)
-
-        if verbose:
-            image.save(f"{output_dir}/{simplification_mode}_{img_info['file_name']}")
-    except Exception as e:
-        print(f"Error processing image {img_info['file_name']}: {e}")
-    return input_polygons, output_polygons
-
-def process_coco_annotations(json_file, image_dir, output_dir, simplification_mode='convex', max_points=7, verbose=True, num_processes=1):
-    """
-    Processes COCO annotations by overlaying simplified polygons on the images.
-    Now supports multiprocessing with proper progress tracking.
-    """
-    with open(json_file, 'r') as file:
-        coco_data = json.load(file)
-
-    image_infos = coco_data['images']
     
-    args_list = [(img_info, coco_data, image_dir, output_dir, simplification_mode, max_points, verbose) for img_info in image_infos]
-
-    if num_processes > 1:
-        # Initialize the pool outside of the tqdm context to avoid issues with tqdm and multiprocessing
-        pool = Pool(num_processes)
-        results = []
-        with tqdm(total=len(args_list)) as pbar:
-            for _ in pool.imap_unordered(process_image_data, args_list):
-                pbar.update()  # Manually update progress for each task completed
-                results.append(_)
-        pool.close()  # Make sure to close the pool after processing is done
-        pool.join()
-    else:
-        results = [process_image_data(args) for args in tqdm(args_list)]
-
-    # Flatten results
-    input_polygons = [polygon for result in results for polygon in result[0]]
-    output_polygons = [polygon for result in results for polygon in result[1]]
-
+    for ann in annotations:
+        for segmentation in ann['segmentation']:
+            polygon = [(segmentation[i], segmentation[i+1]) for i in range(0, len(segmentation), 2)]
+            if type(polygon[0][0]) == str:
+                continue
+            input_polygons.append(polygon)
+            
+            if simplification_mode == 'OG':
+                simplified_polygon = [pts for pts in polygon if type(pts[0]) != str]
+            elif simplification_mode == 'bbox':
+                bb = coco2bbox(ann['bbox'])
+                simplified_polygon = bb
+            else:
+                simplified_polygon = simplify_polygon(polygon, simplification_mode, max_points)
+            
+            if verbose:
+                draw.polygon(simplified_polygon, outline='cyan', width=3)
+            output_polygons.append(simplified_polygon)
+    
+    if verbose:
+        image.save(f"{output_dir}/{simplification_mode}_{img_info['file_name']}")
+    
     return input_polygons, output_polygons
+
+def worker_init(args):
+    """
+    Initializes a worker process.
+    """
+    image_dir, output_dir, simplification_mode, max_points, verbose = args
+    
+    return image_dir, output_dir, simplification_mode, max_points, verbose
+
+def worker_process(img_info):
+    image_dir, output_dir, simplification_mode, max_points, verbose = worker_init.worker_args
+    # print(ann_data)
+    return process_single_image(img_info, image_dir, output_dir, simplification_mode, max_points, verbose)
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Simplify COCO dataset masks with optional multiprocessing.")
-    parser.add_argument("--input_json", type=str)
-    parser.add_argument("--input_img", type=str)
-    parser.add_argument("--output_dir", type=str)
-    parser.add_argument("--mode", type=str, choices=['convex', 'RDP', 'convex_max', 'OG', 'bbox'], default='RDP')
-    parser.add_argument("--max_points", type=int, default=6)
-    parser.add_argument("--use_multiprocessing",default=True, action='store_true', help="Enable multiprocessing. Off by default.")
-    parser.add_argument("--num_processes", type=int, default=0, help="Number of processes to use. Defaults to number of CPU cores.")
-
+    global ann_data
+    parser = argparse.ArgumentParser(description="Simplify COCO dataset masks with multiprocessing support.")
+    parser.add_argument("--input_json", type=str, default='/mnt/c/Users/PC/Downloads/coco17/annotations/instances_val2017.json')
+    parser.add_argument("--input_img", type=str, default='/mnt/c/Users/PC/Downloads/coco17/val2017')
+    parser.add_argument("--output_dir", type=str, default='/mnt/c/Users/PC/Downloads/coco17/eval2017')
+    parser.add_argument("--mode", type=str, choices=['convex', 'RDP', 'convex_max', 'OG', 'bbox'], default='convex')
+    parser.add_argument("--max_points", type=int, default=12)
+    parser.add_argument("--num_processes", type=int, default=4, help="Number of processes to use for image processing.")
+    
     args = parser.parse_args()
-
-    if args.use_multiprocessing and args.num_processes <= 0:
-        args.num_processes = multiprocessing.cpu_count()
-
+    
+    with open(args.input_json, 'r') as file:
+        coco_data = json.load(file)
+        ann_data=coco_data['annotations']
+    
+    worker_init.worker_args = (args.input_img, args.output_dir, args.mode, args.max_points, False)
+    
     start_time = time()
-    ground_truth, simplified_masks = process_coco_annotations(
-        args.input_json,
-        args.input_img,
-        args.output_dir,
-        args.mode,
-        args.max_points,
-        verbose=False,
-        num_processes=args.num_processes if args.use_multiprocessing else 1
-    )
+    aggregated_results = []
+    with Pool(args.num_processes) as p:
+        aggregated_results  = p.map(worker_process, coco_data['images'])
+    
     end_time = time()
-
+    
     print(f"Elapsed time: {end_time - start_time} seconds")
-    evaluate_masks(ground_truth, simplified_masks)
+    evaluate_masks_aggregated(aggregated_results)
     
     print(f"Elapsed time: {end_time - start_time} seconds")
     evaluate_masks(ground_truth, simplified_masks)
