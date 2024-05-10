@@ -198,7 +198,7 @@ if __name__ == "__main__":
     # Periodically check the status of the batch job
     for _ in range(10):
         batch_obj = my_batch_inferencer.batch_status(requested_batch.id)
-        if batch_obj.status == 'complete':
+        if batch_obj.status == 'completed':
             # If the job is complete, download the output file
             my_batch_inferencer.batch_out_retrieve(batch_obj.output_file_id, 'output.jsonl')
             print("Batch job complete. Output saved to 'output.jsonl'.")
