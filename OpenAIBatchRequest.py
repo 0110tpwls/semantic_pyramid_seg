@@ -1,15 +1,11 @@
 from openai import OpenAI
+from PIL import Image
+from datasets import load_dataset
 import requests
 import json
 import os
 import time
-
-from openai import OpenAI
-import requests
-import json
-import os
-import time
-
+import base64
 
 class OpenAIBatchInference:
     """
@@ -28,7 +24,7 @@ class OpenAIBatchInference:
             api_key (str): The API key for accessing OpenAI services.
         """
         self.api_key = api_key
-        self.client = OpenAI(api_key=api_key)
+        self.client = OpenAI(api_key=self.api_key)
 
     def batch_upload(self, file_path: str):
         """
@@ -153,7 +149,7 @@ def make_openai_format_request_file(query_list, output_file, model="gpt-3.5-turb
     Create a file in OpenAI's JSONL format for making requests to the GPT-3.5 Turbo model.
 
     Args:
-        query_list (list): A list of queries, each containing 'passage' and 'question'.
+        query_list (list): A list of queries.
         output_file (str): Path to the output file where the requests will be written.
         model (str, optional): The model to use for completion. Defaults to "gpt-3.5-turbo-0125".
         sys_prompt (str, optional): The system prompt to use in the conversation. Defaults to 'You are a helpful assistant.'.
@@ -182,27 +178,86 @@ def make_openai_format_request_file(query_list, output_file, model="gpt-3.5-turb
 
     return output_file
 
+# Function to encode the image
+def encode_image(image_path):
+    with open(image_path, "rb") as image_file:
+        return base64.b64encode(image_file.read()).decode('utf-8')
 
-if __name__ == "__main__":
+def make_gpt4v_format_request_file(query_list, image_path_list, output_file, model="gpt-4-turbo", img_res_mode='low', sys_prompt='You are a helpful assistant.'):
+    """
+    Create a file in OpenAI's JSONL format for making requests to the GPT-3.5 Turbo model.
+
+    Args:
+        query_list (list): A list of queries.
+        image_list (list): A list of local images for query.
+        output_file (str): Path to the output file where the requests will be written.
+        model (str, optional): The model to use for completion. Defaults to "gpt-4-turbo".
+        img_res_mode (str, optional): The resolution mode of the image. Choose between 'low', 'high', 'auto'. Defaults to 'low'.
+        sys_prompt (str, optional): The system prompt to use in the conversation. Defaults to 'You are a helpful assistant.'.
+
+    Returns:
+        str: The path to the output file created.
+    """
+    request_template = {
+        "custom_id": "request-",
+        "method": "POST",
+        "url": "/v1/chat/completions",
+        "body": {
+            "model": model,
+            "messages": [{"role": "system", "content": sys_prompt}, {}],
+            "max_tokens": 1500
+        }
+    }
+
+    # Write each query into the output file in the OpenAI JSONL format
+    with open(output_file, 'w') as f:
+        for idx, query in enumerate(query_list):
+            # query_data = json.loads(query) 
+            chat_message = {"role": "user", "content": [ {'type':'text', 'text': query},{'type':'image_url', 'image_url': {'url': f"data:image/jpeg;base64,{encode_image(image_path_list[idx])}",'detail': img_res_mode}}]}
+            request_template["custom_id"] = f"request-{idx}"
+            request_template["body"]["messages"][-1] = chat_message
+            f.write(json.dumps(request_template) + '\n')
+
+    return output_file
+
+def run_test(model="gpt-4-turbo"):
     # Example usage
     my_api_key = os.getenv("OPENAI_API_KEY")
-    sample_file = 'dev_openai_request.jsonl'
-
     # Initialize the batch inferencer
     my_batch_inferencer = OpenAIBatchInference(api_key=my_api_key)
+    
+    #Prepare your question_list, img_path_list here, input_file_path and output_file_path
+    question_list=[]
+    img_path_list=[]
+    input_jsonl_path= 'sample_vqa.jsonl'
+    output_jsonl_path ='output.jsonl'
+    
+    start_time=time.time()
+    make_gpt4v_format_request_file(question_list, img_path_list,input_jsonl_path,model=model)
 
     # Create a new batch job
-    requested_batch = my_batch_inferencer.batch_request(sample_file)
+    requested_batch = my_batch_inferencer.batch_request('sample_vqa.jsonl')
     print(f"Batch job posted with ID: {requested_batch.id}")
-
+    batch_id = requested_batch.id
+    
     # Periodically check the status of the batch job
-    for _ in range(10):
-        batch_obj = my_batch_inferencer.batch_status(requested_batch.id)
+    for _ in range(50):
+        batch_obj = my_batch_inferencer.batch_status(batch_id)
+        print(f"Batch job status: {batch_obj.status}")
         if batch_obj.status == 'completed':
             # If the job is complete, download the output file
-            my_batch_inferencer.batch_out_retrieve(batch_obj.output_file_id, 'output.jsonl')
-            print("Batch job complete. Output saved to 'output.jsonl'.")
+            my_batch_inferencer.batch_out_retrieve(batch_obj.output_file_id, output_jsonl_path)
+            print(f"Batch job complete. Output saved to {output_jsonl_path}.")
+            print('it took {} seconds'.format(time.time()-start_time))
             break
         else:
             print("Batch job is still running.")
             time.sleep(60)
+            
+if __name__ == "__main__":
+    print("Running test for gpt-4-turbo model")
+    run_test()
+    
+    print("\nRunning test for gpt-4o model")
+    run_test(model="gpt-4o")
+
