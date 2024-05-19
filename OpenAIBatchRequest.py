@@ -6,6 +6,7 @@ import json
 import os
 import time
 import base64
+import argparse
 
 class OpenAIBatchInference:
     """
@@ -220,20 +221,20 @@ def make_gpt4v_format_request_file(query_list, image_path_list, output_file, mod
 
     return output_file
 
-def run_test(model="gpt-4-turbo"):
-    # Example usage
+def run_test(model, input_jsonl_path, output_jsonl_path):
     my_api_key = os.getenv("OPENAI_API_KEY")
     # Initialize the batch inferencer
     my_batch_inferencer = OpenAIBatchInference(api_key=my_api_key)
     
-    #Prepare your question_list, img_path_list here, input_file_path and output_file_path
-    question_list=[]
-    img_path_list=[]
-    input_jsonl_path= 'sample_vqa.jsonl'
-    output_jsonl_path ='output.jsonl'
+    #load dataset from local_dir and print the first 5 examples
+    dataset = load_dataset("/home/jerry0110/sj_projects/llm_t2i/lmm_archive/data/0_images/okvqa_test/raw")
+
+    #Prepare your question_list, img_path_list here
+    question_list=[] #list of string for each query to gpt
+    img_path_list=[] #list of image path corresponding to each query
     
     start_time=time.time()
-    make_gpt4v_format_request_file(question_list, img_path_list,input_jsonl_path,model=model)
+    make_gpt4v_format_request_file(question_list, img_path_list,'sample_vqa.jsonl',model=model)
 
     # Create a new batch job
     requested_batch = my_batch_inferencer.batch_request('sample_vqa.jsonl')
@@ -246,8 +247,8 @@ def run_test(model="gpt-4-turbo"):
         print(f"Batch job status: {batch_obj.status}")
         if batch_obj.status == 'completed':
             # If the job is complete, download the output file
-            my_batch_inferencer.batch_out_retrieve(batch_obj.output_file_id, output_jsonl_path)
-            print(f"Batch job complete. Output saved to {output_jsonl_path}.")
+            my_batch_inferencer.batch_out_retrieve(batch_obj.output_file_id, 'output.jsonl')
+            print("Batch job complete. Output saved to 'output.jsonl'.")
             print('it took {} seconds'.format(time.time()-start_time))
             break
         else:
@@ -255,9 +256,15 @@ def run_test(model="gpt-4-turbo"):
             time.sleep(60)
             
 if __name__ == "__main__":
-    print("Running test for gpt-4-turbo model")
-    run_test()
+    parser = argparse.ArgumentParser(description="Run batch inference test")
+    parser.add_argument('--model', type=str, default="gpt-4-turbo", help='Model to use for inference')
+    parser.add_argument('--input_file_path', type=str, required=True, help='Path to save input JSONL file')
+    parser.add_argument('--output_file_path', type=str, required=True, help='Path to save output JSONL file')
+    args = parser.parse_args()
     
-    print("\nRunning test for gpt-4o model")
-    run_test(model="gpt-4o")
-
+    print(f"Running test for {args.model} model")
+    run_test(
+        model=args.model,
+        input_jsonl_path=args.input_file_path,
+        output_jsonl_path=args.output_file_path
+    )
